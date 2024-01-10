@@ -2,6 +2,7 @@ import {
   typeObj,
   uniqueTypeObj,
   s,
+  l,
   intersect,
   noReps,
   combs,
@@ -27,7 +28,7 @@ const cond = (domains = [], order = [], equals = [], unequals = []) => {
     s(...unequals.map((i) => l(...i))),
   ];
   return createCond(keys, {
-    domains: Object.fromEntries(keys[0].map((d) => [d.ref, d])),
+    domains: new Map(keys[0].map((d) => [d.ref, d])),
     order: keys[1],
     equals: keys[2],
     unequals: keys[3],
@@ -142,7 +143,7 @@ export const neq = (...args) => {
   }
 };
 
-const and = (a, b) => {
+const and2 = (a, b) => {
   if (!a[valkey] || !a[valkey]) return invalid("NotBoolOutcome");
   return prop(
     valkey,
@@ -156,6 +157,7 @@ const and = (a, b) => {
     })
   );
 };
+const and = (...args) => args.reduce(and2);
 
 const andConds = (a, b) => {
   if (a === false || b === false) return false;
@@ -165,39 +167,72 @@ const andConds = (a, b) => {
     uniqueInA: uniqueInARefs,
     common: commonRefs,
     uniqueInB: uniqueInBRefs,
-  } = intersect(Object.keys(a.domains), Object.keys(b.domains));
+  } = intersect([...a.domains.keys()], [...b.domains.keys()]);
 
   const orderArray = noReps(...a.order, ...b.order);
 
   const commonDomains = commonRefs.map((r) => {
-    const da = a.domains[r];
-    const db = b.domains[r];
+    const da = a.domains.get(r);
+    const db = b.domains.get(r);
     if (da.max < db.min || db.max < da.min) return false;
     const min = Math.max(da.min, db.min);
     const max = Math.min(da.max, db.max);
-    if (min > max) return false;
-    return domain(
-      r,
-      min,
-      max,
-      ...noReps(
-        ...da.holes.filter((h) => h <= max && h >= min),
-        ...db.holes.filter((h) => h <= max && h >= min)
-      )
+    const holes = noReps(
+      ...da.holes.filter((h) => h <= max && h >= min),
+      ...db.holes.filter((h) => h <= max && h >= min)
     );
+    if (min > max) return false;
+    if (min === max && holes.includes(min)) return false;
+    return domain(r, min, max, ...holes);
   });
 
   if (commonDomains.includes(false)) return false;
-  return [
-    cond(
-      [
-        ...uniqueInARefs.map((r) => a.domains[r]),
-        ...commonDomains,
-        ...uniqueInBRefs.map((r) => b.domains[r]),
-      ],
-      orderArray
-    ),
+
+  const unFixeddomains = [
+    ...uniqueInARefs.map((r) => a.domains.get(r)),
+    ...commonDomains,
+    ...uniqueInBRefs.map((r) => b.domains.get(r)),
   ];
+
+  const refMinMax = new Map(
+    unFixeddomains.map(({ ref, min, max, holes }) => [ref, { min, max, holes }])
+  );
+
+  if (
+    orderArray.some((it) =>
+      it.slice(0, -1).some((r1, i) => {
+        const r2 = it[i + 1];
+        const r1m = refMinMax.get(r1);
+        const r2m = refMinMax.get(r2);
+
+        r1m.max = Math.min(r2m.max, r1m.max);
+        if (r1m.max === r2m.max) r1m.holes = noReps(...r1m.holes, r1m.max);
+
+        r2m.min = Math.max(r2m.min, r1m.min);
+        if (r2m.min === r1m.min) r2m.holes = noReps(...r2m.holes, r2m.min);
+
+        return (
+          r1m.max < r1m.min ||
+          r2m.max < r2m.min ||
+          (r1m.min === r1m.max && r1m.holes.includes(r1m.min)) ||
+          (r2m.min === r2m.max && r2m.holes.includes(r2m.min))
+        );
+      })
+    )
+  )
+    return false;
+
+  const domains = unFixeddomains.map((d) => {
+    const { min, max, holes } = refMinMax.get(d.ref);
+    return domain(
+      d.ref,
+      min,
+      max,
+      ...holes.filter((h) => h <= max && h >= min)
+    );
+  });
+
+  return [cond(domains, orderArray)];
 };
 
 //TODO: orConds
@@ -209,9 +244,19 @@ const desc = (x) => {
       x.ref
     )} ${x.holes.includes(x.max) ? "<" : "≤"} ${desc(x.max)}`;
   if (isCond(x))
-    return Object.values(x.domains)
-      .map((d) => `[${desc(d)}]`)
-      .join(" ");
+    return [
+      [...x.domains.values()].map((d) => `[${desc(d)}]`).join(" "),
+      x.order
+        .map(
+          (it) =>
+            "[" +
+            it
+              .map((r, i) => desc(r) + (i < it.length - 1 ? " < " : ""))
+              .join("") +
+            "]"
+        )
+        .join(" "),
+    ].join(" ");
   if (isOutcome(x)) return `${desc(x.cond)} -> ${desc(x.val)}`;
   if (isProp(x))
     return x[valkey]
@@ -224,17 +269,27 @@ const desc = (x) => {
   return x;
 };
 
-//test
+//manual test
 
 const a = ref("a");
 const b = ref("b");
 
-const app = and(and(gt(a, 5), lt(a, 8)), gt(a, 7));
+const app = and(gt(a, 10), lt(a, 10), lt(b, 1));
 
-console.log(desc(app));
+console.log(desc(app), "\n\n");
 
-// gt(a, 2) lt(b, 4) neq(a, b)
+//automated tests
 
-// gt(a, 2) lt(a, 4)
-// gt(b, 2) lt(b, 4)
-// gt(a, 2) lt(b, 4) gt(a, b)
+console.assert(
+  and(gt(a, 1), gt(a, 5))
+    [valkey].find((o) => o.val === true)
+    .cond.domains.get(a).min === 5,
+  "test min"
+);
+
+console.assert(
+  and(lt(a, 1), lt(a, 5))
+    [valkey].find((o) => o.val === true)
+    .cond.domains.get(a).max === 1,
+  "test max"
+);

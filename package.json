@@ -10,7 +10,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "i": "^0.3.7",
     "many-keys-map": "^2.0.1",
     "npm": "^10.2.5"
   }

@@ -10,6 +10,7 @@ import {
 } from "./utils.js";
 
 const valkey = Symbol("value");
+const defkey = Symbol("default");
 
 const [createRef, isRef] = typeObj("ref");
 export const ref = (label) =>
@@ -42,10 +43,15 @@ const outcome = (cond, val) =>
     val,
   });
 
+const [createVal, isVal] = uniqueTypeObj("val");
+const val = (def, ...outcomes) => {
+  return createVal([def, s(...outcomes)], { def, outcomes: s(...outcomes) });
+};
+
 const [createProp, isProp] = uniqueTypeObj("prop");
-const prop = (key, ...outcomes) =>
-  createProp([key, s(...outcomes)], {
-    [key]: s(...outcomes),
+const prop = (key, val) =>
+  createProp([key, val], {
+    [key]: val,
   });
 
 const [createInvalid, isInvalid] = uniqueTypeObj("invalid");
@@ -54,13 +60,15 @@ const invalid = (key) => createInvalid([key], { key });
 export const gt = (...args) => {
   const bothRefs = args.every(isRef);
   if (bothRefs) {
-    return prop(valkey, outcome(cond([], [[...args].reverse()]), true));
+    return prop(
+      valkey,
+      val(false, outcome(cond([], [[...args].reverse()]), true))
+    );
   } else {
     const [r, c] = args;
     return prop(
       valkey,
-      outcome(cond([domain(r, c, Infinity, c)]), true),
-      outcome(cond([domain(r, -Infinity, c)]), false)
+      val(false, outcome(cond([domain(r, c, Infinity, c)]), true))
     );
   }
 };
@@ -70,15 +78,17 @@ export const gte = (...args) => {
   if (bothRefs) {
     return prop(
       valkey,
-      outcome(cond([], [[...args].reverse()]), true),
-      outcome(cond([], [], [[args]]), true)
+      val(
+        false,
+        outcome(cond([], [[...args].reverse()]), true),
+        outcome(cond([], [], [[args]]), true)
+      )
     );
   } else {
     const [r, c] = args;
     return prop(
       valkey,
-      outcome(cond([domain(r, c, Infinity)]), true),
-      outcome(cond([domain(r, -Infinity, c, c)]), false)
+      val(false, outcome(cond([domain(r, c, Infinity)]), true))
     );
   }
 };
@@ -86,13 +96,12 @@ export const gte = (...args) => {
 export const lt = (...args) => {
   const bothRefs = args.every(isRef);
   if (bothRefs) {
-    return prop(valkey, outcome(cond([], [args]), true));
+    return prop(valkey, val(false, outcome(cond([], [args]), true)));
   } else {
     const [r, c] = args;
     return prop(
       valkey,
-      outcome(cond([domain(r, -Infinity, c, c)]), true),
-      outcome(cond([domain(r, c, Infinity)]), false)
+      val(false, outcome(cond([domain(r, -Infinity, c, c)]), true))
     );
   }
 };
@@ -102,15 +111,17 @@ export const lte = (...args) => {
   if (bothRefs) {
     return prop(
       valkey,
-      outcome(cond([], [args]), true),
-      outcome(cond([], [], [args]), true)
+      val(
+        false,
+        outcome(cond([], [args]), true),
+        outcome(cond([], [], [args]), true)
+      )
     );
   } else {
     const [r, c] = args;
     return prop(
       valkey,
-      outcome(cond([domain(r, -Infinity, c)]), true),
-      outcome(cond([domain(r, c, Infinity, c)]), false)
+      val(false, outcome(cond([domain(r, -Infinity, c)]), true))
     );
   }
 };
@@ -118,28 +129,20 @@ export const lte = (...args) => {
 export const eq = (...args) => {
   const bothRefs = args.every(isRef);
   if (bothRefs) {
-    return prop(valkey, outcome(cond([], [], [args]), true));
+    return prop(val(false, valkey, outcome(cond([], [], [args]), true)));
   } else {
     const [r, c] = args;
-    return prop(
-      valkey,
-      outcome(cond([domain(r, c, c)]), true),
-      outcome(cond([domain(r, c, c, c)]), false)
-    );
+    return prop(valkey, val(false, outcome(cond([domain(r, c, c)]), true)));
   }
 };
 
 export const neq = (...args) => {
   const bothRefs = args.every(isRef);
   if (bothRefs) {
-    return prop(valkey, outcome(cond([], [], [], [args]), true));
+    return prop(valkey, val(false, outcome(cond([], [], [], [args]), true)));
   } else {
     const [r, c] = args;
-    return prop(
-      valkey,
-      outcome(cond([domain(r, c, c, c)]), true),
-      outcome(cond([domain(r, c, c)]), false)
-    );
+    return prop(valkey, val(false, outcome(cond([domain(r, c, c, c)]), true)));
   }
 };
 
@@ -147,14 +150,17 @@ const and2 = (a, b) => {
   if (!a[valkey] || !a[valkey]) return invalid("NotBoolOutcome");
   return prop(
     valkey,
-    ...combs(a[valkey], b[valkey]).flatMap(([ao, bo]) => {
-      const andc = andConds(ao.cond, bo.cond);
-      const isValid = isBool(ao.val) && isBool(bo.val);
-      if (!andc) return [];
-      return andc.map((c) =>
-        outcome(c, isValid ? ao.val && bo.val : invalid("NotBoolOutcome"))
-      );
-    })
+    val(
+      false,
+      ...combs(a[valkey].outcomes, b[valkey].outcomes).flatMap(([ao, bo]) => {
+        const andc = andConds(ao.cond, bo.cond);
+        const isValid = isBool(ao.val) && isBool(bo.val);
+        if (!andc) return [];
+        return andc.map((c) =>
+          outcome(c, isValid ? ao.val && bo.val : invalid("NotBoolOutcome"))
+        );
+      })
+    )
   );
 };
 const and = (...args) => args.reduce(and2);
@@ -258,9 +264,10 @@ const desc = (x) => {
         .join(" "),
     ].join(" ");
   if (isOutcome(x)) return `${desc(x.cond)} -> ${desc(x.val)}`;
+  if (isVal(x)) return `${x.outcomes.map((o) => desc(o)).join("\n")}`;
   if (isProp(x))
     return x[valkey]
-      ? `::\n${x[valkey].map((o) => desc(o)).join("\n")}`
+      ? `::\n${desc(x[valkey])}`
       : Object.entries(x)
           .map(([k, v]) => `${k}:\n${desc(v)}`)
           .join("\n\n");
@@ -274,22 +281,6 @@ const desc = (x) => {
 const a = ref("a");
 const b = ref("b");
 
-const app = and(gt(a, 10), lt(a, 10), lt(b, 1));
+const app = and(gt(a, 1), lt(b, 3), lte(a, b));
 
 console.log(desc(app), "\n\n");
-
-//automated tests
-
-console.assert(
-  and(gt(a, 1), gt(a, 5))
-    [valkey].find((o) => o.val === true)
-    .cond.domains.get(a).min === 5,
-  "test min"
-);
-
-console.assert(
-  and(lt(a, 1), lt(a, 5))
-    [valkey].find((o) => o.val === true)
-    .cond.domains.get(a).max === 1,
-  "test max"
-);
